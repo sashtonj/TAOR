@@ -20,6 +20,7 @@ RELOAD_TRANSACTION_TIME = 17  # Seconds
 TIME_BLOCK_LENGTH = 15 * 60  # 15 Minutes * 60 seconds
 TIME_BLOCKS = 68  # Between 6am and 11pm
 SIMULATION_RUNTIME = TIME_BLOCKS * TIME_BLOCK_LENGTH
+VERBOSE = True  # Log output to the console?
 
 """
 === UTILITY FUNCTIONS ===
@@ -30,10 +31,11 @@ def log(env, message, with_time=True):
     """
     Append the current simulation time to the print message. Add 6 hours because we start at 6am.
     """
-    if with_time:
-        print(f"{timedelta(seconds=env.now) + timedelta(hours=6)}: {message}")
-    else:
-        print(message)
+    if VERBOSE:
+        if with_time:
+            print(f"{timedelta(seconds=env.now) + timedelta(hours=6)}: {message}")
+        else:
+            print(message)
 
 
 def get_time_block(env):
@@ -112,24 +114,16 @@ def go_to_station(env, customer, station):
 
 
 def simulate_customers(env, station, demands):
-    # demands = [22, 97, 205, 439, 557, 797, 737, 814, 847, 809, 570, 608, 421, 461, 419, 349, 306, 262, 273, 282, 276,
-    #            251, 216, 210, 193, 190, 204, 203, 228, 266, 296, 157, 151, 166, 182, 171, 179, 154, 170,
-    #            159, 126, 111, 115, 107, 126, 111, 132, 122, 101, 115, 110, 99, 95, 71, 79, 84, 73, 78, 64, 47, 46, 31,
-    #            44, 40, 31, 24, 14, 11]
-
     customer_idx = 1
     while True:
-        time_between_customers = round(random.expovariate((demands[get_time_block(env)] * 60) / 54000))
+        arrivals_per_second = (demands[get_time_block(env)] * 60) / 54000
+        time_between_customers = round(random.expovariate(arrivals_per_second))
         yield env.timeout(time_between_customers)
         env.process(go_to_station(env, customer_idx, station))
         customer_idx += 1
 
 
 def start_simulation():
-    # schedule = [1, 1, 2, 4, 5, 6, 6, 6, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 2, 2, 2, 2,
-    #             2, 2, 2, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
-    #             0, 0, 0, 0]
-    #
     schedule = parse_staff_schedule(staff)
     demands = parse_customer_demand(D)
     env = simpy.Environment()
