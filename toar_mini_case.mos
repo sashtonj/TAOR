@@ -5,7 +5,7 @@ model station_staffing
 
   declarations
 
-    ! Constantsz
+    ! Constants
     diff_transactions = 2 ! "buy" "reload"
     collectors_types = 2 ! "uses terminal" "no terminal"
     diff_shifts = 3 ! 1 hr, 2 hr , 8 hr
