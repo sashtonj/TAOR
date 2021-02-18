@@ -78,7 +78,8 @@ model station_staffing
 
     ! Impose upper and lower limits, respectively, on the staffing levels at the station booth
     forall (p in P, q in Q) n(p,q) <= U(p) * w(p,q) ! (A3)
-    forall (q in Q) sum(p in P) n(p,q)>= min_staff ! (A4)
+    ! forall (q in Q) sum(p in P) n(p,q)>= min_staff ! (A4)
+    forall(q in Q) n(1,q) >= min_staff
 
     ! Estimated demand is met
     forall (q in Q) sum( t in T, p in P) f(t,p,q)*n(p,q) >= sum (t in T) D(t,q) ! (A6)
@@ -93,7 +94,7 @@ model station_staffing
 
     ! (A11) Simulation Constraint about how many collectors per block
     forall(q in Q) do
-      sum(p in P) n(p, q) >= V(q)
+      n(1, q) >= V(q)
     end-do
 
     ! Minimize objective function
@@ -112,7 +113,7 @@ model station_staffing
     end-do
 
     setparam('pyusepandas', false) ! May not need
-  
+
     initializations to "python:"
       staff D V cond
     end-initializations
@@ -123,6 +124,6 @@ model station_staffing
       cond V
     end-initializations
 
-  until cond > -1
+  until cond = -1
 
 end-model
