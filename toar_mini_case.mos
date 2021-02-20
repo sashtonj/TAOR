@@ -5,41 +5,48 @@ model station_staffing
 
   declarations
 
-    ! Constants
+    ! CONSTANTS
     diff_transactions = 2 ! "buy" "reload"
     collectors_types = 2 ! "uses terminal" "no terminal"
     diff_shifts = 3 ! 1 hr, 2 hr , 8 hr
     time_blocks = 68 ! 6:00 - 11:00 15 minute blocks
     min_staff = 1 ! Minimum staff
 
-    ! Sets
+    ! SETS
     T = 1..diff_transactions
     transaction_type: array(T) of string
-
     P = 1..collectors_types
     collectors_type: array(P) of string
-
     L = 1..diff_shifts
     shift_lengths: array(L) of integer
-
     Q = 1..time_blocks
 
-    ! Parameter
-    C : array(P, L) of integer ! Cost of having a fare collector of type p working a shift of length l
-    D : array(T, Q) of integer ! Demand of transaction t in time block Q
-    f : array(T, P, Q) of integer ! Service ability of transaction t by collector type p in time block q
-    U : array(P) of integer ! Maximum number of collector type P in a shift
-    V : array(Q) of integer ! Minimum fare collectors on duty during time block q. Updated after simulation has run
+    ! PARAMETERS
+    ! Cost of having a fare collector of type p working a shift of length l
+    C : array(P, L) of integer
+    ! Demand of transaction t in time block Q
+    D : array(T, Q) of integer 
+    ! Service ability of transaction t by collector type p in time block q
+    f : array(T, P, Q) of integer
+    ! Maximum number of collector type P in a shift
+    U : array(P) of integer
+    ! Minimum fare collectors on duty during time block q. Updated after simulation has run
+    V : array(Q) of integer
 
-    ! Decision Variables
-    x: array(P, Q, L) of mpvar ! No. of fare collectors of type p to be sceduled in shift l and start on time block q
-    n: array(P, Q) of mpvar ! No of fare collectors of type p on duty in time block q
-    w: array(P, Q) of mpvar ! B.V that's activated if at least one collector of type p is on duty on time block q
-    y: array(Q) of mpvar ! B.V that's activated if fare collectors during shift q are less than shift q-1
-    z: array(Q) of mpvar ! B.V that's activated if fare collectors during shift q are more than shift q-1
+    ! DECISION VARIABLES
+    ! No. of fare collectors of type p to be sceduled in shift l and start on time block q
+    x: array(P, Q, L) of mpvar
+    ! No of fare collectors of type p on duty in time block q
+    n: array(P, Q) of mpvar
+    ! B.V that's activated if at least one collector of type p is on duty on time block q
+    w: array(P, Q) of mpvar
+    ! B.V that's activated if fare collectors during shift q are less than shift q-1
+    y: array(Q) of mpvar
+    ! B.V that's activated if fare collectors during shift q are more than shift q-1
+    z: array(Q) of mpvar
 
-    ! Export
-    staff: dynamic array(P, Q) of real ! export x to python3
+    ! Exported to Python
+    staff: dynamic array(P, Q) of real
 
   end-declarations
 
@@ -103,7 +110,6 @@ model station_staffing
   ! -- (A10)
   forall (q in 2..time_blocks-1) y(q+1)+z(q+1) <=1
 
-
   complete := 0 ! Initial condition of the loop
   repeat
     ! -- (A11) Min number of staff required in time block. Updated by the simulation model
@@ -111,7 +117,6 @@ model station_staffing
       n(1, q) >= V(q)
     end-do
 
-    ! Minimize objective function
     minimize(total_cost)
 
     ! Determine Optimality
@@ -140,5 +145,4 @@ model station_staffing
     end-if
 
   until (complete > 0)
-
 end-model

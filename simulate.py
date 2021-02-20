@@ -25,7 +25,7 @@ TIME_BLOCKS = 68  # Between 6am and 11pm
 SIMULATION_RUNTIME = TIME_BLOCKS * TIME_BLOCK_LENGTH
 TIME_BETWEEN_QUEUE_RECORDINGS = 60  # How many seconds in between each queue length recording?
 QUEUE_RECORDINGS = math.floor(SIMULATION_RUNTIME / TIME_BETWEEN_QUEUE_RECORDINGS)
-VERBOSE = False  # Log output to the console?
+VERBOSE = True  # Log output to the console?
 
 """
 === UTILITY FUNCTIONS/CLASSES ===
@@ -237,7 +237,7 @@ def start_simulation():
     # Start Recording queue length
     env.process(record_queue_lengths(env, station))
     # Start simulating customers with prepaid cards
-    env.process(simulate_customers(env, station, demands[TransactionType.RELOAD], TransactionType.RELOAD))
+    # env.process(simulate_customers(env, station, demands[TransactionType.RELOAD], TransactionType.RELOAD))
     # Start simulating customers buying tickets
     env.process(simulate_customers(env, station, demands[TransactionType.BUY], TransactionType.BUY))
 
