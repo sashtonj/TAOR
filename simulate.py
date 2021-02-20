@@ -9,10 +9,10 @@ from enum import IntEnum
 === MOSEL VARIABLES ===
 """
 
-global staff
-global D
-global V
-global cond
+global staff  # Staff schedule
+global D  # Demands
+global V  # Controls the min number of staff per time block constraint
+global complete  # Will be used to signal simulation completion
 
 """
 === PARAMETERS ===
@@ -67,7 +67,7 @@ def parse_staff_schedule(staff_schedule):
     """Translates the mosel staff schedule into a 2D array in the format [collector_type, time_block]"""
     schedule = np.zeros((2, TIME_BLOCKS), dtype=int)
     for collector, time_block in list(staff_schedule.keys()):
-        schedule[collector - 1, time_block - 1] = staff_schedule[collector, time_block]
+        schedule[collector - 1, time_block - 1] = round(staff_schedule[collector, time_block])
     return schedule
 
 
@@ -75,7 +75,7 @@ def parse_customer_demand(demand):
     """Translates the mosel demands into a 2D array in the format [transaction_type, time_block]"""
     demands = np.zeros((2, TIME_BLOCKS), dtype=int)
     for transaction_type, time_block in list(demand.keys()):
-        demands[transaction_type - 1, time_block - 1] = demand[transaction_type, time_block]
+        demands[transaction_type - 1, time_block - 1] = round(demand[transaction_type, time_block])
     return demands
 
 
@@ -94,16 +94,10 @@ class FareCollector(simpy.PriorityResource):
         super().__init__(env, capacity)
 
     def sell_ticket(self, customer):
-        if not self.on_shift:
-            self.users[0].cancel()
-            return
         yield self.env.timeout(BUY_TICKET_TRANSACTION_TIME)
         log(self.env, f"Customer {customer} bought a ticket from fare-collector {self.idx}!")
 
     def reload_card(self, customer):
-        if not self.on_shift:
-            self.users[0].cancel()
-            return
         yield self.env.timeout(RELOAD_CARD_TRANSACTION_TIME)
         log(self.env, f"Customer {customer} reloaded their card from fare-collector {self.idx}!")
 
@@ -153,30 +147,30 @@ class Station(object):
     def remove_fare_collectors(self, num_to_remove, collector_type):
         """
         To mimic the behaviour of removing staff, we request a fare-collector using a higher priority
-        than customers (-1). Once we have the fare-collector, we don't release them back into the resource pool
+        than customers (-1). Once we have the fare-collector, we set it's on_shift boolean variable to False
+        which prevents other customers from requesting this fare collector until on_shift = True again
         """
         on_shift = list(filter(lambda x: x.collector_type is collector_type and x.on_shift, self.booth))
         for i in range(num_to_remove):
             with on_shift[i].request(priority=-1) as request:
                 yield request
                 on_shift[i].on_shift = False
-                print(f"Removing Collector {on_shift[i].idx} who has a queue length of {len(on_shift[i].queue)}")
 
-                # Clear get queue
         log(self.env, f"Removed {num_to_remove} fare-collector(s) of type {collector_type}")
 
     def add_fare_collectors(self, num_to_add, collector_type):
-        """When we need more fare-collectors again, release them back into the pool to be used by customers"""
+        """When we need more fare-collectors, request one and change their on_shift boolean to True"""
         log(self.env, f"Adding {num_to_add} fare-collector(s) of type {collector_type}")
         on_shift = list(filter(lambda x: x.collector_type is collector_type and not x.on_shift, self.booth))
         for x in range(num_to_add):
             on_shift[x].on_shift = True
-            print(f"Adding Collector {on_shift[x].idx} who has a queue length of {len(on_shift[x].queue)}")
 
     def count_collectors_on_shift(self, collector_type):
+        """Returns the number of collectors of a given type that are currently on shift"""
         return len([x for x in self.booth if x.collector_type is collector_type and x.on_shift])
 
     def get_fare_collectors_on_shift(self):
+        """Return the fare-collector instances that currently on shift"""
         return list(filter(lambda x: x.on_shift, self.booth))
 
 
@@ -193,21 +187,24 @@ def select_fare_collector(station, transaction_type):
 
 
 def go_to_station(env, customer, station, transaction_type):
+    """This function imitates a customer arriving at the station, selecting a fare-collector and queueing"""
     log(env, f"Customer {customer} has arrived at the station")
     fare_collector = select_fare_collector(station, transaction_type)
     with fare_collector.request() as request:
         yield request
-        if transaction_type is TransactionType.RELOAD:
+        if transaction_type is TransactionType.RELOAD and fare_collector.on_shift:
             yield env.process(fare_collector.reload_card(customer))
-        elif transaction_type is TransactionType.BUY:
+        elif transaction_type is TransactionType.BUY and fare_collector.on_shift:
             yield env.process(fare_collector.sell_ticket(customer))
 
 
 def simulate_customers(env, station, demands, transaction_type):
+    """Customers with odd indexes are buying tickets, even are reloading prepaid cards"""
     customer_idx = 1 if transaction_type is TransactionType.BUY else 2
     while True:
         arrivals_per_second = calculate_arrival_rate(demands[get_time_block(env)])
         time_between_customers = round(random.expovariate(arrivals_per_second))
+        # time_between_customers = random.randint(1, 25)
         yield env.timeout(time_between_customers)
         env.process(go_to_station(env, customer_idx, station, transaction_type))
         customer_idx += 2
@@ -216,29 +213,22 @@ def simulate_customers(env, station, demands, transaction_type):
 def record_queue_lengths(env, station):
     """Every minute, record the length of the queue for each fare_collector on shift"""
     while True:
+        queue = []
         for collector in station.booth:
             if collector.on_shift:
+                queue.append(collector.get_queue_length())
                 collector.record_queue_length()
+
+        # if max(queue) > 10:
+        # print(f"{get_time_block(env)}: {queue}")
         yield env.timeout(TIME_BETWEEN_QUEUE_RECORDINGS)
 
 
 def start_simulation():
     # Get data from optimization model
-    # schedule = parse_staff_schedule(staff)
-    # demands = parse_customer_demand(D)
-    schedule = [
-        [1, 1, 2, 4, 5, 6, 6, 6, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 2, 2, 2, 2, 2, 2,
-         2, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        [0, 0, 0, 0, 1, 2, 2, 3, 4, 3, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
-
-    demands = [
-        [22, 97, 205, 439, 557, 797, 737, 814, 847, 809, 570, 608, 421, 461, 419, 349, 306, 262, 273, 282, 276, 251,
-         216, 210, 193, 190, 204, 203, 228, 266, 296, 157, 151, 166, 182, 171, 179, 154, 170, 159, 126, 111, 115, 107,
-         126, 111, 132, 122, 101, 115, 110, 99, 95, 71, 79, 84, 73, 78, 64, 47, 46, 31, 44, 40, 31, 24, 14, 11],
-        [3, 20, 30, 115, 233, 172, 254, 236, 249, 229, 235, 121, 163, 117, 75, 60, 82, 107, 89, 64, 65, 29, 54, 53, 55,
-         52, 39, 42, 39, 108, 81, 45, 56, 40, 23, 36, 26, 54, 31, 32, 45, 40, 40, 42, 29, 38, 15, 19, 33, 22, 20, 15,
-         13, 30, 16, 18, 18, 22, 16, 17, 13, 13, 5, 6, 9, 6, 3, 1]]
+    global complete
+    schedule = parse_staff_schedule(staff)
+    demands = parse_customer_demand(D)
     # Initialise simulation environment
     env = simpy.Environment()
     station = Station(env, schedule)
@@ -253,19 +243,36 @@ def start_simulation():
 
     env.run(until=SIMULATION_RUNTIME)
 
-    avg_queue_length_per_min = [0] * QUEUE_RECORDINGS
-    for x in range(QUEUE_RECORDINGS):
-        queue_length = 0
-        time_block = math.floor(x / 15)
-        num_of_staff = schedule[CollectorType.WITH_TERMINAL][time_block] \
-                       + schedule[CollectorType.WITHOUT_TERMINAL][time_block]
+    """
+    This section needs cleaned up and properly implemented but we wanted to quickly
+    ensure that the IP constraints could be updated appropriately based
+    on the average queue length during a time block.
+    """
+    avg_queue_length_per_time_block = [0] * TIME_BLOCKS
+    for time_block in range(TIME_BLOCKS):
+        start = time_block*15
+        finish = (time_block*15) + 15
+        num_of_staff = schedule[CollectorType.WITH_TERMINAL][time_block]+schedule[CollectorType.WITHOUT_TERMINAL][time_block]
         for collector in station.booth:
-            queue_length += collector.queue_lengths[x]
+            avg_queue_length = 0
+            for minute in range(start, finish):
+                avg_queue_length += collector.queue_lengths[minute]
+            avg_queue_length_per_time_block[time_block] += round(avg_queue_length/15)
+        avg_queue_length_per_time_block[time_block] = round(avg_queue_length_per_time_block[time_block] / num_of_staff)
 
-        avg_queue_length_per_min[x] = round(queue_length / num_of_staff)
+    complete = 1
+    for time_block in range(TIME_BLOCKS):
+        if avg_queue_length_per_time_block[time_block] > 10:
+            V[time_block + 1] = int(schedule[CollectorType.WITH_TERMINAL][time_block] + 1)
+            print(f"Adding 1 to time block {time_block + 1}")
+            complete = 0
+            break
 
-    print(station.booth[5].queue_lengths)
-    print(max(avg_queue_length_per_min))
+    if complete == 1:
+        print(schedule)
+    else:
+        print(avg_queue_length_per_time_block)
+        print(V)
 
 
 if __name__ == '__main__':
