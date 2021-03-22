@@ -9,6 +9,7 @@ from enum import IntEnum
 === MOSEL VARIABLES ===
 """
 
+
 global staff  # Staff schedule
 global D  # Demands
 global V  # Controls the min number of staff per time block constraint
@@ -18,14 +19,16 @@ global complete  # Will be used to signal simulation completion
 === PARAMETERS ===
 """
 
+
 BUY_TICKET_TRANSACTION_TIME = 11  # Seconds
 RELOAD_CARD_TRANSACTION_TIME = 17  # Seconds
+SERVICE_STANDARD = 10  # Max average queue length allowed
 TIME_BLOCK_LENGTH = 15 * 60  # 15 Minutes * 60 seconds
 TIME_BLOCKS = 68  # Between 6am and 11pm
-SIMULATION_RUNTIME = TIME_BLOCKS * TIME_BLOCK_LENGTH
+SIMULATION_RUNTIME = TIME_BLOCKS * TIME_BLOCK_LENGTH  # Seconds
 TIME_BETWEEN_QUEUE_RECORDINGS = 60  # How many seconds in between each queue length recording?
-QUEUE_RECORDINGS = math.floor(SIMULATION_RUNTIME / TIME_BETWEEN_QUEUE_RECORDINGS)
-VERBOSE = True  # Log output to the console?
+SIMULATIONS = 1  # Number of simulations to run
+VERBOSE = False  # Log output to the console?
 
 """
 === UTILITY FUNCTIONS/CLASSES ===
@@ -85,12 +88,11 @@ def parse_customer_demand(demand):
 
 
 class FareCollector(simpy.PriorityResource):
-    def __init__(self, env, capacity, idx, has_terminal=False):
+    def __init__(self, env, capacity, idx, collector_type):
         self.env = env
         self.idx = idx
         self.on_shift = False
-        self.collector_type = CollectorType.WITH_TERMINAL if has_terminal else CollectorType.WITHOUT_TERMINAL
-        self.queue_lengths = [0] * QUEUE_RECORDINGS
+        self.collector_type = collector_type
         super().__init__(env, capacity)
 
     def sell_ticket(self, customer):
@@ -104,9 +106,6 @@ class FareCollector(simpy.PriorityResource):
     def get_queue_length(self):
         return len(self.queue) + len(self.users)
 
-    def record_queue_length(self):
-        self.queue_lengths[math.floor(self.env.now/60)] = self.get_queue_length()
-
 
 class Station(object):
     def __init__(self, env, schedule):
@@ -116,11 +115,15 @@ class Station(object):
         idx = 0
         # Add fare-collectors to the station booth
         for i in range(max(self.schedule[CollectorType.WITH_TERMINAL])):
-            self.booth.append(FareCollector(self.env, capacity=1, idx=idx, has_terminal=True))
+            self.booth.append(
+                FareCollector(self.env, capacity=1, idx=idx, collector_type=CollectorType.WITH_TERMINAL)
+            )
             idx += 1
 
         for i in range(max(self.schedule[CollectorType.WITHOUT_TERMINAL])):
-            self.booth.append(FareCollector(self.env, capacity=1, idx=idx))
+            self.booth.append(
+                FareCollector(self.env, capacity=1, idx=idx, collector_type=CollectorType.WITHOUT_TERMINAL)
+            )
             idx += 1
 
     def allocate_staff(self, collector_type):
@@ -210,69 +213,70 @@ def simulate_customers(env, station, demands, transaction_type):
         customer_idx += 2
 
 
-def record_queue_lengths(env, station):
+def record_queue_lengths(env, station, queue_lengths):
     """Every minute, record the length of the queue for each fare_collector on shift"""
     while True:
         queue = []
+        on_shift = 0
         for collector in station.booth:
             if collector.on_shift:
                 queue.append(collector.get_queue_length())
-                collector.record_queue_length()
+                on_shift += 1
 
-        # if max(queue) > 10:
-        # print(f"{get_time_block(env)}: {queue}")
+        avg_queue_len = (sum(queue)/on_shift)/60
+        time_block = get_time_block(env)
+        for t in range(time_block, time_block-4, -1):
+            if t < 0:
+                break
+            queue_lengths[t] += avg_queue_len
+
         yield env.timeout(TIME_BETWEEN_QUEUE_RECORDINGS)
 
 
 def start_simulation():
     # Get data from optimization model
     global complete
+    global staff
+    global D
+    global V
+    # queue_lengths = [0] * TIME_BLOCKS
     schedule = parse_staff_schedule(staff)
     demands = parse_customer_demand(D)
-    # Initialise simulation environment
-    env = simpy.Environment()
-    station = Station(env, schedule)
-    # Allocate staff
-    env.process(station.start_shift())
-    # Start Recording queue length
-    env.process(record_queue_lengths(env, station))
-    # Start simulating customers with prepaid cards
-    # env.process(simulate_customers(env, station, demands[TransactionType.RELOAD], TransactionType.RELOAD))
-    # Start simulating customers buying tickets
-    env.process(simulate_customers(env, station, demands[TransactionType.BUY], TransactionType.BUY))
 
-    env.run(until=SIMULATION_RUNTIME)
+    avg_queue_lengths = [0] * TIME_BLOCKS
+    for i in range(SIMULATIONS):
+        print(f"Starting simulation run {i+1}")
 
-    """
-    This section needs cleaned up and properly implemented but we wanted to quickly
-    ensure that the IP constraints could be updated appropriately based
-    on the average queue length during a time block.
-    """
-    avg_queue_length_per_time_block = [0] * TIME_BLOCKS
-    for time_block in range(TIME_BLOCKS):
-        start = time_block*15
-        finish = (time_block*15) + 15
-        num_of_staff = schedule[CollectorType.WITH_TERMINAL][time_block]+schedule[CollectorType.WITHOUT_TERMINAL][time_block]
-        for collector in station.booth:
-            avg_queue_length = 0
-            for minute in range(start, finish):
-                avg_queue_length += collector.queue_lengths[minute]
-            avg_queue_length_per_time_block[time_block] += round(avg_queue_length/15)
-        avg_queue_length_per_time_block[time_block] = round(avg_queue_length_per_time_block[time_block] / num_of_staff)
+        # Initialise simulation environment
+        env = simpy.Environment()
+        station = Station(env, schedule)
+        # Allocate staff
+        env.process(station.start_shift())
+        # Start Recording queue length
+        queue_lengths = [0] * TIME_BLOCKS
+        env.process(record_queue_lengths(env, station, queue_lengths))
+        # Start simulating customers with prepaid cards
+        env.process(simulate_customers(env, station, demands[TransactionType.RELOAD], TransactionType.RELOAD))
+        # Start simulating customers buying tickets
+        env.process(simulate_customers(env, station, demands[TransactionType.BUY], TransactionType.BUY))
+
+        env.run(until=SIMULATION_RUNTIME)
+        for t in range(TIME_BLOCKS):
+            avg_queue_lengths[t] += queue_lengths[t] / SIMULATIONS
 
     complete = 1
-    for time_block in range(TIME_BLOCKS):
-        if avg_queue_length_per_time_block[time_block] > 10:
-            V[time_block + 1] = int(schedule[CollectorType.WITH_TERMINAL][time_block] + 1)
-            print(f"Adding 1 to time block {time_block + 1}")
+    for t in range(TIME_BLOCKS):
+        if avg_queue_lengths[t] > SERVICE_STANDARD:
+            # t+1 because V is a model object which is indexed from 1 instead of 0
+            on_shift = int(schedule[CollectorType.WITH_TERMINAL][t]) + int(schedule[CollectorType.WITHOUT_TERMINAL][t])
+            V[t+1] = on_shift + 1
             complete = 0
+            print(f"Time Block {t+1} has an average queue length of {round(avg_queue_lengths[t])}.")
+            print(f"Increasing minimum staff in this time block from {on_shift} to {on_shift+1}\n")
             break
 
     if complete == 1:
         print(schedule)
-    else:
-        print(avg_queue_length_per_time_block)
-        print(V)
 
 
 if __name__ == '__main__':

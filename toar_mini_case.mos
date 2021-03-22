@@ -53,7 +53,13 @@ model station_staffing
   initialisations from "toar.dat"
     transaction_type collectors_type shift_lengths C D f U
   end-initialisations
-
+  
+  forall(q in Q) do
+    f(1, 1, q) := 81 ! Fare collectors with a terminal: buying throughput
+    f(2, 1, q) := 53 ! Fare collectors with a terminal: reload throughput
+    f(1, 2, q) := 81 ! Fare collectors without a terminal: buying throughput
+  end-do
+  
   ! --------------------------------
   ! Decision Variable Initialization
   ! --------------------------------
@@ -94,7 +100,7 @@ model station_staffing
 
   ! -- (A4) Impose lower limits on staffing levels
   forall(q in Q) n(1, q) >= min_staff
-
+  
   ! -- (A6) Ensure that the estimated demand is met
   forall (q in Q) do
     sum( t in T, p in P) f(t, p, q) * n(p, q) >= sum (t in T) D(t, q)
@@ -114,7 +120,7 @@ model station_staffing
   repeat
     ! -- (A11) Min number of staff required in time block. Updated by the simulation model
     forall(q in Q) do
-      n(1, q) >= V(q)
+      sum(p in P) n(p, q) >= V(q)
     end-do
 
     minimize(total_cost)
