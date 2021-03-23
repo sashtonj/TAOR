@@ -7,7 +7,7 @@ model station_staffing
 
     ! CONSTANTS
     diff_transactions = 2 ! "buy" "reload"
-    collectors_types = 2 ! "uses terminal" "no terminal"
+    collectors_types = 4 ! "uses terminal" "no terminal"
     diff_shifts = 3 ! 1 hr, 2 hr , 8 hr
     time_blocks = 68 ! 6:00 - 11:00 15 minute blocks
     min_staff = 1 ! Minimum staff
@@ -25,7 +25,7 @@ model station_staffing
     ! Cost of having a fare collector of type p working a shift of length l
     C : array(P, L) of integer
     ! Demand of transaction t in time block Q
-    D : array(T, Q) of integer 
+    D : array(T, Q) of integer
     ! Service ability of transaction t by collector type p in time block q
     f : array(T, P, Q) of integer
     ! Maximum number of collector type P in a shift
@@ -48,18 +48,23 @@ model station_staffing
     ! Exported to Python
     staff: dynamic array(P, Q) of real
 
+    has_priority: array(P, P) of integer
+
   end-declarations
 
   initialisations from "toar.dat"
-    transaction_type collectors_type shift_lengths C D f U
+    transaction_type collectors_type shift_lengths C D f U has_priority
   end-initialisations
-  
+
   forall(q in Q) do
     f(1, 1, q) := 81 ! Fare collectors with a terminal: buying throughput
     f(2, 1, q) := 53 ! Fare collectors with a terminal: reload throughput
     f(1, 2, q) := 81 ! Fare collectors without a terminal: buying throughput
+    f(1, 3, q) := 81 ! Mobile fare collector with a terminal: buying throughput
+    f(2, 3, q) := 51 ! Mobile fare collector with a terminal: reload throughput
+    f(1, 4, q) := 81 ! Mobile fare collector without a terminal: buying throughput
   end-do
-  
+
   ! --------------------------------
   ! Decision Variable Initialization
   ! --------------------------------
@@ -100,7 +105,12 @@ model station_staffing
 
   ! -- (A4) Impose lower limits on staffing levels
   forall(q in Q) n(1, q) >= min_staff
-  
+
+  ! -- (A5) Priority of fare collector types
+  forall(p in P, q in Q) do
+    sum(p_prime in P) n(p_prime, q)*has_priority(p_prime, p) >= (sum(p_prime in P) U(p_prime)*has_priority(p_prime, p))*w(p, q)
+  end-do
+
   ! -- (A6) Ensure that the estimated demand is met
   forall (q in Q) do
     sum( t in T, p in P) f(t, p, q) * n(p, q) >= sum (t in T) D(t, q)
@@ -131,6 +141,14 @@ model station_staffing
       ! Export Staff to python
       forall (p in P, q in Q) do
         staff(p, q):= getsol(n(p, q))
+      end-do
+      
+      forall(p in P) do
+        writeln(collectors_type(p))
+        forall(q in Q) do
+          write(getsol(n(p, q)), " ")
+        end-do
+        writeln(" ")
       end-do
 
       initializations to "python:"

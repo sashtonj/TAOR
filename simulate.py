@@ -70,7 +70,8 @@ def parse_staff_schedule(staff_schedule):
     """Translates the mosel staff schedule into a 2D array in the format [collector_type, time_block]"""
     schedule = np.zeros((2, TIME_BLOCKS), dtype=int)
     for collector, time_block in list(staff_schedule.keys()):
-        schedule[collector - 1, time_block - 1] = round(staff_schedule[collector, time_block])
+        c = (collector-1) % 2
+        schedule[c, time_block - 1] += round(staff_schedule[collector, time_block])
     return schedule
 
 
@@ -239,7 +240,7 @@ def start_simulation():
     global staff
     global D
     global V
-    # queue_lengths = [0] * TIME_BLOCKS
+
     schedule = parse_staff_schedule(staff)
     demands = parse_customer_demand(D)
 
@@ -276,6 +277,7 @@ def start_simulation():
             break
 
     if complete == 1:
+        # Print Final Schedule
         print(schedule)
 
 
