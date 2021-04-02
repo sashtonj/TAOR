@@ -9,26 +9,24 @@ from enum import IntEnum
 === MOSEL VARIABLES ===
 """
 
-
-global staff  # Staff schedule
-global D  # Demands
-global V  # Controls the min number of staff per time block constraint
-global complete  # Will be used to signal simulation completion
+global schedule  # Staff schedule from Mosel model
+global D  # Customer demands from Mosel model
+global V  # Controls the min number of staff per time block constraint - from Mosel
+global complete  # Will be used to signal convergence
+global VERBOSE  # Log output to the console?
 
 """
 === PARAMETERS ===
 """
 
-
 BUY_TICKET_TRANSACTION_TIME = 11  # Seconds
 RELOAD_CARD_TRANSACTION_TIME = 17  # Seconds
-SERVICE_STANDARD = 10  # Max average queue length allowed
+SERVICE_STANDARD = 3  # Max average queue length allowed
 TIME_BLOCK_LENGTH = 15 * 60  # 15 Minutes * 60 seconds
 TIME_BLOCKS = 68  # Between 6am and 11pm
 SIMULATION_RUNTIME = TIME_BLOCKS * TIME_BLOCK_LENGTH  # Seconds
 TIME_BETWEEN_QUEUE_RECORDINGS = 60  # How many seconds in between each queue length recording?
-SIMULATIONS = 1  # Number of simulations to run
-VERBOSE = False  # Log output to the console?
+SIMULATIONS = 1  # Number of simulation runs to perform
 
 """
 === UTILITY FUNCTIONS/CLASSES ===
@@ -36,6 +34,10 @@ VERBOSE = False  # Log output to the console?
 
 
 class CollectorType(IntEnum):
+    """
+    For the purposes of the simulation - mobile and static fare collectors are treated
+    identically because we are only concerned with the queue lengths.
+    """
     WITH_TERMINAL = 0
     WITHOUT_TERMINAL = 1
 
@@ -43,17 +45,6 @@ class CollectorType(IntEnum):
 class TransactionType(IntEnum):
     BUY = 0
     RELOAD = 1
-
-
-def log(env, message, with_time=True):
-    """
-    Append the current simulation time to the print message. Add 6 hours because we start at 6am.
-    """
-    if VERBOSE:
-        if with_time:
-            print(f"{timedelta(seconds=env.now) + timedelta(hours=6)}: {message}")
-        else:
-            print(message)
 
 
 def get_time_block(env):
@@ -67,16 +58,16 @@ def calculate_arrival_rate(time_block_demand):
 
 
 def parse_staff_schedule(staff_schedule):
-    """Translates the mosel staff schedule into a 2D array in the format [collector_type, time_block]"""
-    schedule = np.zeros((2, TIME_BLOCKS), dtype=int)
+    """Translates the Mosel staff schedule into a 2D array in the format [collector_type, time_block]"""
+    staff = np.zeros((2, TIME_BLOCKS), dtype=int)
     for collector, time_block in list(staff_schedule.keys()):
-        c = (collector-1) % 2
-        schedule[c, time_block - 1] += round(staff_schedule[collector, time_block])
-    return schedule
+        c = (collector - 1) % 2
+        staff[c, time_block - 1] += round(staff_schedule[collector, time_block])
+    return staff
 
 
 def parse_customer_demand(demand):
-    """Translates the mosel demands into a 2D array in the format [transaction_type, time_block]"""
+    """Translates the Mosel demands into a 2D array in the format [transaction_type, time_block]"""
     demands = np.zeros((2, TIME_BLOCKS), dtype=int)
     for transaction_type, time_block in list(demand.keys()):
         demands[transaction_type - 1, time_block - 1] = round(demand[transaction_type, time_block])
@@ -97,12 +88,10 @@ class FareCollector(simpy.PriorityResource):
         super().__init__(env, capacity)
 
     def sell_ticket(self, customer):
-        yield self.env.timeout(BUY_TICKET_TRANSACTION_TIME)
-        log(self.env, f"Customer {customer} bought a ticket from fare-collector {self.idx}!")
+        yield self.env.timeout(random.expovariate(1 / BUY_TICKET_TRANSACTION_TIME))
 
     def reload_card(self, customer):
-        yield self.env.timeout(RELOAD_CARD_TRANSACTION_TIME)
-        log(self.env, f"Customer {customer} reloaded their card from fare-collector {self.idx}!")
+        yield self.env.timeout(random.expovariate(1 / RELOAD_CARD_TRANSACTION_TIME))
 
     def get_queue_length(self):
         return len(self.queue) + len(self.users)
@@ -140,8 +129,6 @@ class Station(object):
 
     def start_shift(self):
         while True:
-            log(self.env, f"Starting Time Block {get_time_block(self.env)}...", False)
-
             # Checks staff schedule and adds/removes fare-collectors as required
             self.allocate_staff(CollectorType.WITH_TERMINAL)
             self.allocate_staff(CollectorType.WITHOUT_TERMINAL)
@@ -160,11 +147,8 @@ class Station(object):
                 yield request
                 on_shift[i].on_shift = False
 
-        log(self.env, f"Removed {num_to_remove} fare-collector(s) of type {collector_type}")
-
     def add_fare_collectors(self, num_to_add, collector_type):
         """When we need more fare-collectors, request one and change their on_shift boolean to True"""
-        log(self.env, f"Adding {num_to_add} fare-collector(s) of type {collector_type}")
         on_shift = list(filter(lambda x: x.collector_type is collector_type and not x.on_shift, self.booth))
         for x in range(num_to_add):
             on_shift[x].on_shift = True
@@ -192,7 +176,6 @@ def select_fare_collector(station, transaction_type):
 
 def go_to_station(env, customer, station, transaction_type):
     """This function imitates a customer arriving at the station, selecting a fare-collector and queueing"""
-    log(env, f"Customer {customer} has arrived at the station")
     fare_collector = select_fare_collector(station, transaction_type)
     with fare_collector.request() as request:
         yield request
@@ -208,7 +191,6 @@ def simulate_customers(env, station, demands, transaction_type):
     while True:
         arrivals_per_second = calculate_arrival_rate(demands[get_time_block(env)])
         time_between_customers = round(random.expovariate(arrivals_per_second))
-        # time_between_customers = random.randint(1, 25)
         yield env.timeout(time_between_customers)
         env.process(go_to_station(env, customer_idx, station, transaction_type))
         customer_idx += 2
@@ -224,9 +206,9 @@ def record_queue_lengths(env, station, queue_lengths):
                 queue.append(collector.get_queue_length())
                 on_shift += 1
 
-        avg_queue_len = (sum(queue)/on_shift)/60
+        avg_queue_len = (sum(queue) / on_shift) / 60
         time_block = get_time_block(env)
-        for t in range(time_block, time_block-4, -1):
+        for t in range(time_block, time_block - 4, -1):
             if t < 0:
                 break
             queue_lengths[t] += avg_queue_len
@@ -237,20 +219,26 @@ def record_queue_lengths(env, station, queue_lengths):
 def start_simulation():
     # Get data from optimization model
     global complete
-    global staff
+    global schedule
     global D
     global V
+    global VERBOSE
 
-    schedule = parse_staff_schedule(staff)
+    staff_levels = parse_staff_schedule(schedule)
     demands = parse_customer_demand(D)
 
+    # Holds the running average of the avg queue length in each time block
     avg_queue_lengths = [0] * TIME_BLOCKS
+
+    # Start simulation
     for i in range(SIMULATIONS):
-        print(f"Starting simulation run {i+1}")
+        if VERBOSE:
+            print(f"+ Starting simulation...")
+            print(f"--- Run {i + 1} of {SIMULATIONS} Completed")
 
         # Initialise simulation environment
         env = simpy.Environment()
-        station = Station(env, schedule)
+        station = Station(env, staff_levels)
         # Allocate staff
         env.process(station.start_shift())
         # Start Recording queue length
@@ -266,19 +254,25 @@ def start_simulation():
             avg_queue_lengths[t] += queue_lengths[t] / SIMULATIONS
 
     complete = 1
+    # Check if service standard has been violated in any time blocks
     for t in range(TIME_BLOCKS):
-        if avg_queue_lengths[t] > SERVICE_STANDARD:
-            # t+1 because V is a model object which is indexed from 1 instead of 0
-            on_shift = int(schedule[CollectorType.WITH_TERMINAL][t]) + int(schedule[CollectorType.WITHOUT_TERMINAL][t])
-            V[t+1] = on_shift + 1
+        if avg_queue_lengths[t] >= SERVICE_STANDARD + 1:
+            # Service standard violated - add an extra member of staff
+            # t+1 because V is from Mosel indexed from 1 instead of 0
+            on_shift = int(staff_levels[CollectorType.WITH_TERMINAL][t]) + int(
+                staff_levels[CollectorType.WITHOUT_TERMINAL][t])
+            V[t + 1] = on_shift + 1
             complete = 0
-            print(f"Time Block {t+1} has an average queue length of {round(avg_queue_lengths[t])}.")
-            print(f"Increasing minimum staff in this time block from {on_shift} to {on_shift+1}\n")
+
+            if VERBOSE:
+                print(f"--- Time Block {t + 1} had an average queue length of: {round(avg_queue_lengths[t])}")
+                print(f"--- Increasing minimum staff from {on_shift} to {on_shift + 1}\n")
             break
 
     if complete == 1:
-        # Print Final Schedule
-        print(schedule)
+        # Optimisation-Simulation complete
+        # Mosel model will print the schedule
+        ...
 
 
 if __name__ == '__main__':

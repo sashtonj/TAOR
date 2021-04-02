@@ -1,0 +1,230 @@
+model station_staffing
+
+  uses "mmxprs"
+  uses "python3"
+
+  parameters
+    ! Used for experimental purposes if you want to run the entire model multiple times
+    NUM_OF_EXECUTIONS = 1
+    ! Print to the terminal?
+    VERBOSE = true
+  end-parameters
+
+  declarations
+    ! CONSTANTS
+    diff_transactions = 2 ! "buy" "reload"
+    collector_types = 4 ! "uses terminal" "no terminal"
+    diff_shifts = 3! 1 hr, 2 hr , 8 hr
+    time_blocks = 68 ! 6:00 - 11:00 15 minute blocks
+    min_staff = 1 ! Minimum staff
+
+    ! SETS
+    T = 1..diff_transactions
+    transaction_type: array(T) of string
+    P = 1..collector_types
+    collector_type: array(P) of string
+    L = 1..diff_shifts
+    shift_lengths: array(L) of integer
+    Q = 1..time_blocks
+
+    ! PARAMETERS
+    ! Cost of having a fare collector of type p working a shift of length l
+    ! C : array(P, L) of integer
+    ! Demand of transaction t in time block Q
+    D : array(T, Q) of integer
+    ! Service ability of transaction t by collector type p in time block q
+    ! We treat the service ability the same for all time blocks and collectors - only the transaction type matters.
+    f : array(T) of integer
+    ! Maximum number of collector type P in a shift
+    U : array(P) of integer
+    ! Minimum fare collectors on duty during time block q. Updated after simulation has run
+    V : array(Q) of integer
+    ! Indicates is collector of type p should be scheduled before type p' i.e. static before mobile collectors
+    has_priority: array(P, P) of integer
+
+
+    ! DECISION VARIABLES
+    ! No. of fare collectors of type p to be sceduled in shift l and start on time block q
+    x: array(P, Q, L) of mpvar
+    ! No of fare collectors of type p on duty in time block q
+    n: array(P, Q) of mpvar
+    ! B.V that's activated if at least one collector of type p is on duty on time block q
+    w: array(P, Q) of mpvar
+    ! B.V that's activated if fare collectors during shift q are less than shift q-1
+    y: array(Q) of mpvar
+    ! B.V that's activated if fare collectors during shift q are more than shift q-1
+    z: array(Q) of mpvar
+
+    ! Exported to Python
+    schedule: dynamic array(P, Q) of real
+
+    ! If we are running the model multiple times for experimentation purposes:
+    ! This set of constraints get reset before each execution, so we must used named constraints to overwrite them
+    min_staff_constraint: array(Q) of linctr
+
+  end-declarations
+
+  initialisations from "station_suburban.dat"
+    transaction_type collector_type shift_lengths has_priority D f U
+  end-initialisations
+
+  ! --------------------------------
+  ! Decision Variable Initialization
+  ! --------------------------------
+
+  forall (p in P, q in Q, l in L) do
+    x(p, q, l) is_integer
+  end-do
+
+  forall (p in P , q in Q) do
+    n(p, q) is_integer
+    w(p, q) is_binary
+  end-do
+
+  forall (q in 2..time_blocks) do
+    y(q) is_binary
+  end-do
+
+  forall (q in 1..(time_blocks-1)) do
+    z(q) is_binary
+  end-do
+
+  ! --------------------------------
+  ! (A1) Objective Function
+  ! --------------------------------
+  ! total_cost:= sum(p in P, l in L, q in Q) C(p, l)*x(p, q, l)
+  total_cost := sum(p in P, l in L, q in Q) (11*shift_lengths(l))/4 * x(p, q, l)
+
+  ! --------------------------------
+  ! Constraints
+  ! --------------------------------
+
+  ! -- (A2) Links the shift-scheduling variables x and the staffing-level variables
+  forall (p in P, q in Q) do
+    sum(l in L , q_prime in 1..q | q_prime >= q-shift_lengths(l) and q_prime <= q) x(p, q_prime, l) = n(p, q)
+  end-do
+
+  ! -- (A3) Impose upper limits on staffing levels
+  forall (p in P, q in Q) n(p, q) <= U(p) * w(p, q) ! (A3)
+
+  ! -- (A4) Impose lower limits on staffing levels
+  forall(q in Q) n(1, q) >= 1
+  forall(q in Q) sum(p in P) n(p, q) >= min_staff
+
+  ! -- (A5) Priority of fare collector types
+  forall(p in P, q in Q) do
+    sum(p_prime in P) n(p_prime, q)*has_priority(p_prime, p) >= (sum(p_prime in P) U(p_prime)*has_priority(p_prime, p))*w(p, q)
+  end-do
+
+  ! -- (A6) Ensure that the estimated demand is met
+  forall (q in Q) do
+    sum( t in T, p in P) f(t) * n(p, q) >= sum (t in T) D(t, q)
+  end-do
+
+  ! -- Prevent increases/immediate decreases in consecutive blocks
+  ! -- (A7)
+  forall (q in 2..time_blocks) sum(p in P) n(p, q-1) - sum(p in P) n(p, q) <= y(q)* sum(p in P) U(p)
+  ! -- (A8)
+  forall (q in 1..time_blocks-1) sum(p in P) n(p, q+1) - sum(p in P) n(p, q) <= z(q)* sum(p in P) U(p)
+  ! -- (A9)
+  forall (q in 2..time_blocks-1) y(q) +z(q) <=1
+  ! -- (A10)
+  forall (q in 2..time_blocks-1) y(q+1)+z(q-1) <=1
+
+  execution := 1
+  total_loops := 1
+  cost := 0.0
+  cpu_time := 0.0
+  iterations := 0
+  repeat
+    if VERBOSE then
+      writeln("\nStarting execution: ", execution)
+    end-if
+     ! Flips to 1 when the simulation model is satisfied with the schedule
+    complete := 0
+
+    ! Reset min staff constraint to all zeros
+    forall(q in Q) V(q) := 0
+
+    ! Record starting time
+    now := time(SYS_NOW)
+    repeat
+      ! -- (A11) Min number of staff required in time block. Updated by the simulation model
+      forall(q in Q) do
+        min_staff_constraint(q) := sum(p in P) n(p, q) >= V(q)
+      end-do
+
+      if VERBOSE then
+        writeln("Beginning iteration ", iterations+1, ":")
+      end-if
+      minimize(total_cost)
+
+      if (getprobstat=XPRS_OPT) then
+        ! Export schedule to python
+        forall (p in P, q in Q) do
+          schedule(p, q):= getsol(n(p, q))
+        end-do
+
+        initializations to "python:"
+          schedule D V complete VERBOSE
+        end-initializations
+
+        ! Start the simulation
+        if VERBOSE then
+          writeln("+ Staff scheduled!")
+        end-if
+        pyrun("simulation.py")
+
+        initializations from "python:"
+          complete V
+        end-initializations
+
+      elif (getprobstat=XPRS_INF) then
+          ! Infeasible - break out of the loop
+          if VERBOSE then
+            writeln("Infeasible!")
+          end-if
+          execution := NUM_OF_EXECUTIONS + 1
+          complete := 1
+      end-if
+
+      iterations := iterations + 1
+    until (complete > 0)
+
+    ! Print Schedule - not pretty, apologies.
+    write(strfmt("Time Block", -25))
+    forall(q in Q) do
+      if sum(p in P, l in L) getsol(x(p, q, l)) > 0 then
+        write(strfmt(q, 5))
+      end-if
+    end-do
+    forall(p in P) do
+      if sum(q in Q, l in L) getsol(x(p, q, l)) > 0 then
+        write("\n", strfmt(collector_type(p), -25))
+      end-if
+      forall(l in L) do
+        if sum(q in Q) getsol(x(p, q, l)) > 0 then
+          write("\n -- ", strfmt(shift_lengths(l)/4, 2), strfmt(" hour shift", -19))
+          forall(q in Q) do
+            if sum(pp in P, ll in L) getsol(x(pp, q, ll)) > 0 then
+              write(strfmt(abs(getsol(x(p, q, l))), 5, 0))
+            end-if
+          end-do
+        end-if
+      end-do
+    end-do
+
+    ! Record end time
+    end_time := time(SYS_NOW)
+
+    ! Update running totals
+    cpu_time := cpu_time + (end_time - now)/1000
+    execution := execution + 1
+    cost := cost + getobjval
+  until (execution > NUM_OF_EXECUTIONS)
+
+  ! Print statistics, averaged over the number of executions performed
+  writeln("\n\nStaff Cost: $", strfmt(cost/NUM_OF_EXECUTIONS, 5, 2))
+  writeln("CPU Time: ", strfmt(cpu_time/NUM_OF_EXECUTIONS, 5, 2), " Seconds")
+  writeln("# of Iterations: ", strfmt(iterations/NUM_OF_EXECUTIONS, 5, 2))
+end-model
